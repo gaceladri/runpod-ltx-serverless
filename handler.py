@@ -46,8 +46,9 @@ def wait_for_comfy(timeout_s: int = 900) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            request_json("/", timeout=5)
-            return
+            with urllib.request.urlopen(COMFY_BASE_URL + "/", timeout=5) as resp:
+                if 200 <= resp.status < 500:
+                    return
         except Exception:
             time.sleep(2)
     raise TimeoutError("ComfyUI API did not become reachable")
