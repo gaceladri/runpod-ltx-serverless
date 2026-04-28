@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -220,6 +221,11 @@ def output_items(history: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def upload_file(path: Path, key: str) -> dict[str, Any]:
+    worker_url = os.environ.get("R2_WORKER_UPLOAD_URL", "").rstrip("/")
+    worker_token = os.environ.get("R2_UPLOAD_TOKEN")
+    if worker_url and worker_token:
+        return upload_file_via_worker(path, key, worker_url, worker_token)
+
     bucket = require_env("R2_BUCKET")
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     extra_args = {
@@ -234,6 +240,32 @@ def upload_file(path: Path, key: str) -> dict[str, Any]:
         "bucket": bucket,
         "key": key,
         "uri": f"r2://{bucket}/{key}",
+        "public_url": f"{public_base_url}/{key}" if public_base_url else None,
+        "bytes": path.stat().st_size,
+    }
+
+
+def upload_file_via_worker(path: Path, key: str, worker_url: str, token: str) -> dict[str, Any]:
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    encoded_key = "/".join(urllib.parse.quote(part) for part in key.split("/"))
+    req = urllib.request.Request(
+        f"{worker_url}/upload/{encoded_key}",
+        data=path.read_bytes(),
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": content_type,
+            "Cache-Control": os.environ.get("R2_CACHE_CONTROL", "public, max-age=31536000, immutable"),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        result = json.load(resp)
+    public_base_url = os.environ.get("R2_PUBLIC_BASE_URL", "").rstrip("/")
+    return {
+        "filename": path.name,
+        "bucket": result.get("bucket", "ltx-video-outputs"),
+        "key": result.get("key", key),
+        "uri": result.get("uri", f"r2://ltx-video-outputs/{key}"),
         "public_url": f"{public_base_url}/{key}" if public_base_url else None,
         "bytes": path.stat().st_size,
     }
@@ -270,4 +302,3 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
-
