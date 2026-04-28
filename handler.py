@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import requests
 import runpod
 from PIL import Image, ImageDraw
 
@@ -248,19 +249,21 @@ def upload_file(path: Path, key: str) -> dict[str, Any]:
 
 def upload_file_via_worker(path: Path, key: str, worker_url: str, token: str) -> dict[str, Any]:
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    encoded_key = "/".join(urllib.parse.quote(part) for part in key.split("/"))
-    req = urllib.request.Request(
-        f"{worker_url}/upload/{encoded_key}",
-        data=path.read_bytes(),
-        method="PUT",
-        headers={
+    encoded_key = "/".join(urllib.parse.quote(part, safe="") for part in key.split("/"))
+    with path.open("rb") as fh:
+        resp = requests.put(
+            f"{worker_url}/upload/{encoded_key}",
+            data=fh,
+            headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": content_type,
             "Cache-Control": os.environ.get("R2_CACHE_CONTROL", "public, max-age=31536000, immutable"),
-        },
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        result = json.load(resp)
+            },
+            timeout=300,
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"R2 worker upload failed: {resp.status_code} {resp.text[:1000]}")
+    result = resp.json()
     public_base_url = os.environ.get("R2_PUBLIC_BASE_URL", "").rstrip("/")
     return {
         "filename": path.name,
@@ -285,6 +288,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     history = wait_for_history(prompt_id, timeout_s)
 
     uploads = []
+    upload_errors = []
     for item in output_items(history):
         if item["type"] == "temp":
             continue
@@ -292,13 +296,25 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         if not path.is_file():
             continue
         key = f"{R2_PREFIX}/{prompt_id}/{item['filename']}"
-        uploads.append(upload_file(path, key))
+        try:
+            uploads.append(upload_file(path, key))
+        except Exception as exc:
+            upload_errors.append({
+                "filename": item["filename"],
+                "key": key,
+                "error": str(exc),
+                "local_path": str(path),
+                "bytes": path.stat().st_size,
+            })
 
-    return {
+    result = {
         "prompt_id": prompt_id,
         "status": (history.get("status") or {}).get("status_str"),
         "outputs": uploads,
     }
+    if upload_errors:
+        result["upload_errors"] = upload_errors
+    return result
 
 
 if __name__ == "__main__":
