@@ -11,6 +11,7 @@ VOLUME = Path(os.environ.get("RUNPOD_VOLUME_PATH", "/runpod-volume"))
 MODELS = VOLUME / "models"
 LTX_CKPT = MODELS / "checkpoints/LTX-Video/ltx-2.3-22b-distilled-1.1.safetensors"
 GEMMA_DIR = MODELS / "text_encoders/gemma-3-12b-it-qat-q4_0-unquantized"
+COMFY_DIR = Path(os.environ.get("COMFY_DIR", "/comfyui"))
 
 
 def require_token() -> str:
@@ -32,6 +33,30 @@ def ensure_volume() -> None:
         "configs",
     ):
         (MODELS / rel).mkdir(parents=True, exist_ok=True)
+
+
+def patch_comfy_paths() -> None:
+    p = COMFY_DIR / "extra_model_paths.yaml"
+    if not p.is_file():
+        return
+    s = p.read_text()
+    if "text_encoders:" not in s:
+        p.write_text(s.rstrip() + "\n  text_encoders: models/text_encoders/\n")
+
+
+def patch_ltx_q4_config_case() -> None:
+    p = COMFY_DIR / "custom_nodes/ComfyUI-LTXVideo/text_embeddings_connectors.py"
+    if not p.is_file():
+        return
+    s = p.read_text()
+    needle = '            actual = transformer_config.get(key)\n'
+    insert = (
+        '            actual = transformer_config.get(key)\n'
+        '            if key == "text_encoder_norm_type" and isinstance(actual, str):\n'
+        '                actual = actual.lower()\n'
+    )
+    if "actual = actual.lower()" not in s:
+        p.write_text(s.replace(needle, insert, 1))
 
 
 def download_models() -> None:
@@ -62,10 +87,11 @@ def download_models() -> None:
 
 def main() -> int:
     ensure_volume()
+    patch_comfy_paths()
+    patch_ltx_q4_config_case()
     download_models()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
